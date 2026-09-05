@@ -73,7 +73,12 @@ def main() -> int:
             {"role": "system", "content": PROMPT},
             {"role": "user", "content": raw},
         ]
-        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        try:
+            # Гибридные Qwen3 иначе "размышляют" прямо в ответ.
+            prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True,
+                                                   enable_thinking=False)
+        except TypeError:
+            prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
         t = time.perf_counter()
         clean = generate(model, tokenizer, prompt=prompt, max_tokens=200,
                          sampler=make_sampler(temp=0.0), verbose=False).strip()
