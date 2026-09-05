@@ -57,6 +57,44 @@ enum DaemonClient {
         }
     }
 
+    struct Term: Identifiable, Equatable {
+        var id: Int
+        /// Как надо: «Claude Code». Уходит в подсказку модели распознавания.
+        var canonical: String
+        /// Как слышится: «клод кот». Заменяется в готовом тексте.
+        /// Пусто — строка работает только как подсказка.
+        var alias: String
+        var enabled: Bool
+    }
+
+    static func terms() throws -> [Term] {
+        let reply = try request(["terms": [:]])
+        if let err = reply["error"] as? String { throw Failure.daemon(err) }
+        return ((reply["items"] as? [[String: Any]]) ?? []).compactMap { row in
+            guard let id = row["id"] as? Int, let canonical = row["canonical"] as? String
+            else { return nil }
+            return Term(id: id, canonical: canonical,
+                        alias: (row["alias"] as? String) ?? "",
+                        enabled: ((row["enabled"] as? Int) ?? 1) == 1)
+        }
+    }
+
+    @discardableResult
+    static func termSave(_ term: Term) throws -> Int {
+        var payload: [String: Any] = [
+            "canonical": term.canonical, "alias": term.alias, "enabled": term.enabled,
+        ]
+        if term.id > 0 { payload["id"] = term.id }
+        let reply = try request(["term_save": payload])
+        if let err = reply["error"] as? String { throw Failure.daemon(err) }
+        return (reply["id"] as? Int) ?? term.id
+    }
+
+    static func termDelete(id: Int) throws {
+        let reply = try request(["term_delete": ["id": id]])
+        if let err = reply["error"] as? String { throw Failure.daemon(err) }
+    }
+
     /// Правка уезжает в демон: пара «было/стало» станет материалом для
     /// словаря, чтобы ту же ошибку больше не повторять.
     static func correct(id: Int, text: String) throws {

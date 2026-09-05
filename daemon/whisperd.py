@@ -21,6 +21,7 @@
 """
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -41,26 +42,56 @@ def log(msg: str) -> None:
     print(f"[whisperd] {msg}", file=sys.stderr, flush=True)
 
 
-def load_dictionary() -> str | None:
-    """Читается на каждый запрос: правки словаря применяются без перезапуска.
+# Окно подсказки Whisper — 224 токена. Держим запас: русские слова
+# дробятся на несколько токенов, и переполнение молча обрежет хвост.
+PROMPT_WORD_LIMIT = 120
 
-    Живёт в папке приложения, а не в репозитории: это данные пользователя,
-    и обновление кода не должно их затирать. При первом запуске кладётся
-    образец из комплекта.
-    """
-    if not DICTIONARY.exists():
-        try:
-            DICTIONARY.parent.mkdir(parents=True, exist_ok=True)
-            DICTIONARY.write_text(DICTIONARY_DEFAULT.read_text(encoding="utf-8"), encoding="utf-8")
-            log(f"создан словарь по образцу: {DICTIONARY}")
-        except OSError as exc:
-            log(f"не удалось создать словарь: {exc}")
-            return None
+
+def seed_terms_if_needed() -> None:
+    """Первое наполнение словаря: из файла пользователя, иначе из образца."""
+    if not store.terms_empty():
+        return
+    source = DICTIONARY if DICTIONARY.exists() else DICTIONARY_DEFAULT
     try:
-        text = DICTIONARY.read_text(encoding="utf-8").strip()
-        return text or None
+        words = [w.strip() for w in source.read_text(encoding="utf-8").replace("\n", " ").split(",")]
     except OSError:
-        return None
+        return
+    added = store.seed_terms([w for w in words if w and not w.startswith("#")])
+    log(f"словарь наполнен из {source.name}: {added} терминов")
+
+
+def build_prompt() -> str | None:
+    """Подсказка модели: только правильные написания, через запятую."""
+    seen, words = set(), []
+    for row in store.terms(enabled_only=True):
+        canonical = row["canonical"]
+        key = canonical.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        words.append(canonical)
+        if len(words) >= PROMPT_WORD_LIMIT:
+            break
+    return ", ".join(words) + "." if words else None
+
+
+def apply_terms(text: str) -> tuple[str, list[str]]:
+    """Замена известных ослышек в готовом тексте.
+
+    Только слово целиком: подстрочная замена испортила бы нормальные слова,
+    внутри которых случайно оказался алиас.
+    """
+    applied = []
+    for row in store.terms(enabled_only=True):
+        alias = row["alias"].strip()
+        if not alias:
+            continue
+        pattern = re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.IGNORECASE)
+        replaced, count = pattern.subn(row["canonical"], text)
+        if count:
+            applied.append(f"{alias} → {row['canonical']}")
+            text = replaced
+    return text, applied
 
 
 def is_hallucination(text: str) -> bool:
@@ -95,6 +126,19 @@ def handle(req: dict, transcribe) -> dict:
         limit = int(req["history"].get("limit", 50))
         return {"items": store.recent(min(limit, 500))}
 
+    if "terms" in req:
+        return {"items": store.terms()}
+
+    if "term_save" in req:
+        t = req["term_save"]
+        new_id = store.term_save(t.get("id"), t.get("canonical", ""),
+                                 t.get("alias", ""), t.get("enabled", True))
+        return {"id": new_id}
+
+    if "term_delete" in req:
+        store.term_delete(int(req["term_delete"]["id"]))
+        return {"ok": True}
+
     if "correct" in req:
         ok = store.correct(int(req["correct"]["id"]), req["correct"]["text"])
         return {"ok": ok}
@@ -102,7 +146,7 @@ def handle(req: dict, transcribe) -> dict:
     wav = req["wav"]
     started = time.perf_counter()
     result = transcribe(wav, path_or_hf_repo=MODEL, language=LANGUAGE,
-                        initial_prompt=load_dictionary())
+                        initial_prompt=build_prompt())
     raw = result["text"].strip()
 
     if is_hallucination(raw):
@@ -110,10 +154,15 @@ def handle(req: dict, transcribe) -> dict:
         log(f"{Path(wav).name}  {ms}ms  отброшено как фантом: {raw[:40]}")
         return {"id": 0, "text": "", "raw": raw, "ms": ms, "rejected": "фантом"}
 
-    text, rejected, proposal = raw, "", ""
+    # Замена ослышек идёт до причёсывания: модели лучше достаётся уже
+    # починенный текст, иначе она примется угадывать исковерканное слово.
+    text, applied = apply_terms(raw)
+    if applied:
+        log(f"словарь: {', '.join(applied)}")
+    rejected, proposal = "", ""
     if req.get("polish"):
         import polish as polisher
-        text, rejected, proposal = polisher.polish(raw)
+        text, rejected, proposal = polisher.polish(text)
 
     ms = int((time.perf_counter() - started) * 1000)
     row_id = store.add(raw=raw, final=text, polished=bool(req.get("polish")), ms=ms,
@@ -139,6 +188,7 @@ def serve() -> int:
         os.system(f'ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 0.5 -ar 16000 -ac 1 -y "{silence}" 2>/dev/null')
     mlx_whisper.transcribe(str(silence), path_or_hf_repo=MODEL, language=LANGUAGE)
     log(f"модель готова за {time.perf_counter() - t0:.1f}s")
+    seed_terms_if_needed()
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(SOCKET))

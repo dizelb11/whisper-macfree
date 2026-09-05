@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS corrections (
     created_at   TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dictations_created ON dictations(created_at DESC);
+CREATE TABLE IF NOT EXISTS terms (
+    id         INTEGER PRIMARY KEY,
+    canonical  TEXT    NOT NULL,               -- как надо: "Claude Code"
+    alias      TEXT    NOT NULL DEFAULT '',    -- как слышится: "клод кот"
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT    NOT NULL,
+    UNIQUE(canonical, alias)
+);
 """
 
 
@@ -95,3 +103,70 @@ def stats() -> dict:
         d = conn.execute("SELECT COUNT(*) n FROM dictations").fetchone()["n"]
         c = conn.execute("SELECT COUNT(*) n FROM corrections").fetchone()["n"]
         return {"dictations": d, "corrections": c}
+
+
+# --- Словарь ---------------------------------------------------------------
+#
+# Одна таблица кормит два разных механизма:
+#   canonical — уходит в подсказку модели распознавания, чтобы ошибка
+#               не случилась вовсе;
+#   alias     — заменяется на canonical уже в готовом тексте, если ошибка
+#               всё-таки проскочила.
+# Строка без alias работает только как подсказка.
+
+
+def terms(enabled_only: bool = False) -> list[dict]:
+    with connect() as conn:
+        sql = "SELECT id, canonical, alias, enabled FROM terms"
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY canonical COLLATE NOCASE, alias"
+        return [dict(r) for r in conn.execute(sql)]
+
+
+def term_save(term_id: int | None, canonical: str, alias: str, enabled: bool) -> int | None:
+    canonical, alias = canonical.strip(), alias.strip()
+    if not canonical:
+        return None
+    with connect() as conn:
+        if term_id:
+            conn.execute(
+                "UPDATE terms SET canonical = ?, alias = ?, enabled = ? WHERE id = ?",
+                (canonical, alias, int(enabled), term_id),
+            )
+            return term_id
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO terms (canonical, alias, enabled, created_at) VALUES (?,?,?,?)",
+            (canonical, alias, int(enabled), now()),
+        )
+        if cur.lastrowid:
+            return cur.lastrowid
+        row = conn.execute(
+            "SELECT id FROM terms WHERE canonical = ? AND alias = ?", (canonical, alias)
+        ).fetchone()
+        return row["id"] if row else None
+
+
+def term_delete(term_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
+
+
+def seed_terms(words: list[str]) -> int:
+    """Первичное наполнение. Возвращает число добавленных."""
+    added = 0
+    with connect() as conn:
+        for word in words:
+            word = word.strip(" .,\n")
+            if not word:
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO terms (canonical, alias, enabled, created_at)"
+                " VALUES (?,?,1,?)", (word, "", now()))
+            added += cur.rowcount
+    return added
+
+
+def terms_empty() -> bool:
+    with connect() as conn:
+        return conn.execute("SELECT COUNT(*) n FROM terms").fetchone()["n"] == 0
