@@ -74,8 +74,14 @@ ANSWER=y
 if [ -t 0 ]; then
     read -r -p "  Ставить mlx-lm для причёсывания текста? Ещё ~2,5 ГБ моделью. [Y/n] " ANSWER
 fi
+POLISH=0
 if [[ ! "${ANSWER:-y}" =~ ^[Nn] ]]; then
-    .venv/bin/pip install -q mlx-lm && ok "mlx-lm" || warn "mlx-lm не установился — причёсывание будет недоступно"
+    if .venv/bin/pip install -q mlx-lm; then
+        ok "mlx-lm"
+        POLISH=1
+    else
+        warn "mlx-lm не установился — причёсывание будет недоступно"
+    fi
 else
     warn "пропущено: причёсывание по Shift работать не будет"
 fi
@@ -84,13 +90,25 @@ step "4. Сборка приложения"
 ./mac/bundle.sh >/dev/null 2>&1 || die "Не удалось собрать приложение."
 ok "Dictate.app"
 
-step "5. Загрузка модели распознавания (1,5 ГБ, это долго)"
+step "5. Загрузка моделей (это долго)"
 .venv/bin/python3 -c "
 import mlx_whisper, sys, os
 os.system('ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 0.5 -ar 16000 -ac 1 -y /tmp/wl-warmup.wav 2>/dev/null')
 mlx_whisper.transcribe('/tmp/wl-warmup.wav', path_or_hf_repo='mlx-community/whisper-large-v3-turbo', language='ru')
 " 2>&1 | grep -vE "^\s*$|it/s\]" | tail -2
-ok "модель загружена"
+ok "модель распознавания загружена"
+
+# Модель причёсывания качаем здесь же. Иначе она подтянется при первом
+# нажатии Shift — и человек несколько минут проведёт в непонимании,
+# сломалось у него или нет.
+if [ "$POLISH" = 1 ]; then
+    echo "  загружаю модель причёсывания (2,5 ГБ, тоже долго)..."
+    .venv/bin/python3 -c "
+from mlx_lm import load
+load('mlx-community/Qwen3-4B-Instruct-2507-4bit')
+" 2>&1 | grep -vE "^\s*$|it/s\]" | tail -1
+    ok "модель причёсывания загружена"
+fi
 
 step "6. Автозапуск"
 if [ "$SKIP_AUTOSTART" = 1 ]; then
