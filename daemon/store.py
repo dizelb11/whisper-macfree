@@ -28,13 +28,18 @@ CREATE TABLE IF NOT EXISTS corrections (
     created_at   TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dictations_created ON dictations(created_at DESC);
-CREATE TABLE IF NOT EXISTS terms (
+-- Два разных инструмента, поэтому две таблицы, а не одна с необязательным
+-- полем: так у каждого одна понятная задача.
+CREATE TABLE IF NOT EXISTS words (
     id         INTEGER PRIMARY KEY,
-    canonical  TEXT    NOT NULL,               -- как надо: "Claude Code"
-    alias      TEXT    NOT NULL DEFAULT '',    -- как слышится: "клод кот"
-    enabled    INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT    NOT NULL,
-    UNIQUE(canonical, alias)
+    word       TEXT    NOT NULL UNIQUE,        -- "Claude Code" — подсказка модели
+    created_at TEXT    NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fixes (
+    id          INTEGER PRIMARY KEY,
+    heard       TEXT    NOT NULL UNIQUE,       -- "клод кот" — что слышится
+    replacement TEXT    NOT NULL,              -- "Claude Code" — на что менять
+    created_at  TEXT    NOT NULL
 );
 """
 
@@ -107,66 +112,99 @@ def stats() -> dict:
 
 # --- Словарь ---------------------------------------------------------------
 #
-# Одна таблица кормит два разных механизма:
-#   canonical — уходит в подсказку модели распознавания, чтобы ошибка
-#               не случилась вовсе;
-#   alias     — заменяется на canonical уже в готовом тексте, если ошибка
-#               всё-таки проскочила.
-# Строка без alias работает только как подсказка.
+# words — слова, которые модель распознавания должна знать заранее. Зная
+#         слово, она перестаёт его коверкать, и чинить нечего.
+# fixes — замены в готовом тексте для случаев, когда подсказка не помогла.
+#
+# В подсказку уходят и слова, и правые части замен: правильное написание
+# полезно подсказать в любом случае.
 
 
-def terms(enabled_only: bool = False) -> list[dict]:
+def words() -> list[dict]:
     with connect() as conn:
-        sql = "SELECT id, canonical, alias, enabled FROM terms"
-        if enabled_only:
-            sql += " WHERE enabled = 1"
-        sql += " ORDER BY canonical COLLATE NOCASE, alias"
-        return [dict(r) for r in conn.execute(sql)]
+        return [dict(r) for r in conn.execute(
+            "SELECT id, word FROM words ORDER BY word COLLATE NOCASE")]
 
 
-def term_save(term_id: int | None, canonical: str, alias: str, enabled: bool) -> int | None:
-    canonical, alias = canonical.strip(), alias.strip()
-    if not canonical:
+def word_save(word_id: int | None, word: str) -> int | None:
+    word = word.strip(" .,")
+    if not word:
         return None
     with connect() as conn:
-        if term_id:
-            conn.execute(
-                "UPDATE terms SET canonical = ?, alias = ?, enabled = ? WHERE id = ?",
-                (canonical, alias, int(enabled), term_id),
-            )
-            return term_id
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO terms (canonical, alias, enabled, created_at) VALUES (?,?,?,?)",
-            (canonical, alias, int(enabled), now()),
-        )
+        if word_id and word_id > 0:
+            conn.execute("UPDATE words SET word = ? WHERE id = ?", (word, word_id))
+            return word_id
+        cur = conn.execute("INSERT OR IGNORE INTO words (word, created_at) VALUES (?,?)",
+                           (word, now()))
         if cur.lastrowid:
             return cur.lastrowid
-        row = conn.execute(
-            "SELECT id FROM terms WHERE canonical = ? AND alias = ?", (canonical, alias)
-        ).fetchone()
+        row = conn.execute("SELECT id FROM words WHERE word = ?", (word,)).fetchone()
         return row["id"] if row else None
 
 
-def term_delete(term_id: int) -> None:
+def word_delete(word_id: int) -> None:
     with connect() as conn:
-        conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
+        conn.execute("DELETE FROM words WHERE id = ?", (word_id,))
 
 
-def seed_terms(words: list[str]) -> int:
-    """Первичное наполнение. Возвращает число добавленных."""
+def fixes() -> list[dict]:
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, heard, replacement FROM fixes ORDER BY heard COLLATE NOCASE")]
+
+
+def fix_save(fix_id: int | None, heard: str, replacement: str) -> int | None:
+    heard, replacement = heard.strip(), replacement.strip()
+    if not heard or not replacement:
+        return None
+    with connect() as conn:
+        if fix_id and fix_id > 0:
+            conn.execute("UPDATE fixes SET heard = ?, replacement = ? WHERE id = ?",
+                         (heard, replacement, fix_id))
+            return fix_id
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO fixes (heard, replacement, created_at) VALUES (?,?,?)",
+            (heard, replacement, now()))
+        if cur.lastrowid:
+            return cur.lastrowid
+        row = conn.execute("SELECT id FROM fixes WHERE heard = ?", (heard,)).fetchone()
+        return row["id"] if row else None
+
+
+def fix_delete(fix_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM fixes WHERE id = ?", (fix_id,))
+
+
+def seed_words(items: list[str]) -> int:
     added = 0
     with connect() as conn:
-        for word in words:
-            word = word.strip(" .,\n")
-            if not word:
-                continue
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO terms (canonical, alias, enabled, created_at)"
-                " VALUES (?,?,1,?)", (word, "", now()))
-            added += cur.rowcount
+        for item in items:
+            item = item.strip(" .,\n")
+            if item:
+                added += conn.execute(
+                    "INSERT OR IGNORE INTO words (word, created_at) VALUES (?,?)",
+                    (item, now())).rowcount
     return added
 
 
-def terms_empty() -> bool:
+def words_empty() -> bool:
     with connect() as conn:
-        return conn.execute("SELECT COUNT(*) n FROM terms").fetchone()["n"] == 0
+        return conn.execute("SELECT COUNT(*) n FROM words").fetchone()["n"] == 0
+
+
+def migrate_terms() -> None:
+    """Перенос из прежней единой таблицы terms, если она осталась."""
+    with connect() as conn:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='terms'").fetchone()
+        if not exists:
+            return
+        for row in conn.execute("SELECT canonical, alias FROM terms"):
+            conn.execute("INSERT OR IGNORE INTO words (word, created_at) VALUES (?,?)",
+                         (row["canonical"], now()))
+            if row["alias"].strip():
+                conn.execute(
+                    "INSERT OR IGNORE INTO fixes (heard, replacement, created_at) VALUES (?,?,?)",
+                    (row["alias"], row["canonical"], now()))
+        conn.execute("DROP TABLE terms")

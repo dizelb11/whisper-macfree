@@ -49,30 +49,34 @@ PROMPT_WORD_LIMIT = 120
 
 def seed_terms_if_needed() -> None:
     """Первое наполнение словаря: из файла пользователя, иначе из образца."""
-    if not store.terms_empty():
+    store.migrate_terms()
+    if not store.words_empty():
         return
     source = DICTIONARY if DICTIONARY.exists() else DICTIONARY_DEFAULT
     try:
         words = [w.strip() for w in source.read_text(encoding="utf-8").replace("\n", " ").split(",")]
     except OSError:
         return
-    added = store.seed_terms([w for w in words if w and not w.startswith("#")])
+    added = store.seed_words([w for w in words if w and not w.startswith("#")])
     log(f"словарь наполнен из {source.name}: {added} терминов")
 
 
 def build_prompt() -> str | None:
-    """Подсказка модели: только правильные написания, через запятую."""
-    seen, words = set(), []
-    for row in store.terms(enabled_only=True):
-        canonical = row["canonical"]
-        key = canonical.lower()
+    """Подсказка модели.
+
+    Берём и слова, и правые части замен: если пользователь завёл замену на
+    "nginx", это правильное написание стоит подсказать в любом случае.
+    """
+    seen, out = set(), []
+    for value in [r["word"] for r in store.words()] + [r["replacement"] for r in store.fixes()]:
+        key = value.lower()
         if key in seen:
             continue
         seen.add(key)
-        words.append(canonical)
-        if len(words) >= PROMPT_WORD_LIMIT:
+        out.append(value)
+        if len(out) >= PROMPT_WORD_LIMIT:
             break
-    return ", ".join(words) + "." if words else None
+    return ", ".join(out) + "." if out else None
 
 
 def apply_terms(text: str) -> tuple[str, list[str]]:
@@ -82,14 +86,14 @@ def apply_terms(text: str) -> tuple[str, list[str]]:
     внутри которых случайно оказался алиас.
     """
     applied = []
-    for row in store.terms(enabled_only=True):
-        alias = row["alias"].strip()
-        if not alias:
+    for row in store.fixes():
+        heard = row["heard"].strip()
+        if not heard:
             continue
-        pattern = re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.IGNORECASE)
-        replaced, count = pattern.subn(row["canonical"], text)
+        pattern = re.compile(r"(?<!\w)" + re.escape(heard) + r"(?!\w)", re.IGNORECASE)
+        replaced, count = pattern.subn(row["replacement"], text)
         if count:
-            applied.append(f"{alias} → {row['canonical']}")
+            applied.append(f"{heard} → {row['replacement']}")
             text = replaced
     return text, applied
 
@@ -126,17 +130,26 @@ def handle(req: dict, transcribe) -> dict:
         limit = int(req["history"].get("limit", 50))
         return {"items": store.recent(min(limit, 500))}
 
-    if "terms" in req:
-        return {"items": store.terms()}
+    if "words" in req:
+        return {"items": store.words()}
 
-    if "term_save" in req:
-        t = req["term_save"]
-        new_id = store.term_save(t.get("id"), t.get("canonical", ""),
-                                 t.get("alias", ""), t.get("enabled", True))
-        return {"id": new_id}
+    if "word_save" in req:
+        w = req["word_save"]
+        return {"id": store.word_save(w.get("id"), w.get("word", ""))}
 
-    if "term_delete" in req:
-        store.term_delete(int(req["term_delete"]["id"]))
+    if "word_delete" in req:
+        store.word_delete(int(req["word_delete"]["id"]))
+        return {"ok": True}
+
+    if "fixes" in req:
+        return {"items": store.fixes()}
+
+    if "fix_save" in req:
+        f = req["fix_save"]
+        return {"id": store.fix_save(f.get("id"), f.get("heard", ""), f.get("replacement", ""))}
+
+    if "fix_delete" in req:
+        store.fix_delete(int(req["fix_delete"]["id"]))
         return {"ok": True}
 
     if "correct" in req:

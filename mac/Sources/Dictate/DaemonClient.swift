@@ -57,42 +57,63 @@ enum DaemonClient {
         }
     }
 
-    struct Term: Identifiable, Equatable {
+    /// Слово, которое распознавание должно знать заранее.
+    struct Word: Identifiable, Equatable {
         var id: Int
-        /// Как надо: «Claude Code». Уходит в подсказку модели распознавания.
-        var canonical: String
-        /// Как слышится: «клод кот». Заменяется в готовом тексте.
-        /// Пусто — строка работает только как подсказка.
-        var alias: String
-        var enabled: Bool
+        var word: String
     }
 
-    static func terms() throws -> [Term] {
-        let reply = try request(["terms": [:]])
+    /// Замена в готовом тексте, когда подсказка не помогла.
+    struct Fix: Identifiable, Equatable {
+        var id: Int
+        var heard: String
+        var replacement: String
+    }
+
+    static func words() throws -> [Word] {
+        let reply = try request(["words": [:]])
         if let err = reply["error"] as? String { throw Failure.daemon(err) }
-        return ((reply["items"] as? [[String: Any]]) ?? []).compactMap { row in
-            guard let id = row["id"] as? Int, let canonical = row["canonical"] as? String
-            else { return nil }
-            return Term(id: id, canonical: canonical,
-                        alias: (row["alias"] as? String) ?? "",
-                        enabled: ((row["enabled"] as? Int) ?? 1) == 1)
+        return ((reply["items"] as? [[String: Any]]) ?? []).compactMap {
+            guard let id = $0["id"] as? Int, let word = $0["word"] as? String else { return nil }
+            return Word(id: id, word: word)
         }
     }
 
     @discardableResult
-    static func termSave(_ term: Term) throws -> Int {
-        var payload: [String: Any] = [
-            "canonical": term.canonical, "alias": term.alias, "enabled": term.enabled,
-        ]
-        if term.id > 0 { payload["id"] = term.id }
-        let reply = try request(["term_save": payload])
+    static func wordSave(_ word: Word) throws -> Int {
+        var payload: [String: Any] = ["word": word.word]
+        if word.id > 0 { payload["id"] = word.id }
+        let reply = try request(["word_save": payload])
         if let err = reply["error"] as? String { throw Failure.daemon(err) }
-        return (reply["id"] as? Int) ?? term.id
+        return (reply["id"] as? Int) ?? word.id
     }
 
-    static func termDelete(id: Int) throws {
-        let reply = try request(["term_delete": ["id": id]])
+    static func wordDelete(id: Int) throws {
+        _ = try request(["word_delete": ["id": id]])
+    }
+
+    static func fixes() throws -> [Fix] {
+        let reply = try request(["fixes": [:]])
         if let err = reply["error"] as? String { throw Failure.daemon(err) }
+        return ((reply["items"] as? [[String: Any]]) ?? []).compactMap {
+            guard let id = $0["id"] as? Int,
+                  let heard = $0["heard"] as? String,
+                  let replacement = $0["replacement"] as? String else { return nil }
+            return Fix(id: id, heard: heard, replacement: replacement)
+        }
+    }
+
+    @discardableResult
+    static func fixSave(_ fix: Fix) throws -> Int {
+        var payload: [String: Any] = ["heard": fix.heard, "replacement": fix.replacement]
+        if fix.id > 0 { payload["id"] = fix.id }
+        let reply = try request(["fix_save": payload])
+        if let err = reply["error"] as? String { throw Failure.daemon(err) }
+        return (reply["id"] as? Int) ?? fix.id
+    }
+
+    static func fixDelete(id: Int) throws {
+        _ = try request(["fix_delete": ["id": id]])
     }
 
     /// Правка уезжает в демон: пара «было/стало» станет материалом для
