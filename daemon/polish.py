@@ -54,6 +54,11 @@ def guard(raw: str, clean: str) -> tuple[str, str]:
         return raw, "дописала лишнее"
     if _distance(a, b) > max(2, len(a) * 0.4):
         return raw, "переписала слишком много"
+    # Обрезка на длинной диктовке теряет меньше 40% слов и проходит проверку
+    # выше. На коротких фразах чистка паразитов законно съедает большую долю,
+    # поэтому смотрим только на достаточно длинные.
+    if len(a) >= 40 and len(b) < len(a) * 0.6:
+        return raw, "потеряла часть текста"
     return clean, ""
 
 
@@ -70,7 +75,20 @@ def polish(text: str) -> tuple[str, str, str]:
         {"role": "user", "content": text},
     ]
     prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-    out = generate(model, tokenizer, prompt=prompt, max_tokens=300,
+
+    # Лимит от длины входа: причёсанный текст примерно равен исходному, но
+    # запас нужен — русские слова дробятся на токены неравномерно. Фиксированные
+    # 300 обрезали длинные диктовки на полуслове.
+    input_tokens = len(tokenizer.encode(text))
+    max_tokens = max(512, input_tokens * 2 + 64)
+
+    out = generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens,
                    sampler=make_sampler(temp=0.0), verbose=False).strip()
+
+    # Упёрлись в лимит — значит генерация оборвана, а не завершена. Такой
+    # текст обрезан на полуслове и вставлять его нельзя.
+    if len(tokenizer.encode(out)) >= max_tokens - 2:
+        return text, "не уместилась в лимит", out
+
     final, rejected = guard(text, out)
     return final, rejected, out
