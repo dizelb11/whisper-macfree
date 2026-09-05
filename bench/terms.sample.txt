@@ -1,0 +1,14 @@
+1	прод
+2	main|пул-реквест
+3	Claude Code
+4	Opus|Sonnet
+5	nginx
+6	бэкап
+7	SSH
+8	валидацию
+9	3.12|brew
+10	claude/benchmark
+11	500|стектрейсе
+12	100
+13	main.py
+14	mlx-whisper|large-v3-turbo|pip

@@ -1,0 +1,19 @@
+.venv/
+bench/audio/
+bench/results/
+models/
+__pycache__/
+*.pyc
+.DS_Store
+.build/
+
+# Собранное приложение — продукт bundle.sh, в репозитории ему не место
+*.app/
+
+# Личный корпус для замера и рабочий словарь — данные владельца, не код.
+# Образцы лежат в bench/*.sample.txt и daemon/dictionary.default.txt
+bench/phrases.txt
+bench/expected.txt
+bench/terms.txt
+bench/dictionary.txt
+llm/cleanup-*.json
