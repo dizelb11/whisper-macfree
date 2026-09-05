@@ -16,9 +16,14 @@
 и около 8 ГБ свободного места.
 
 ```bash
-git clone <адрес-репозитория> whisper-local
-cd whisper-local
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/dizelb11/whisper-macfree/main/bootstrap.sh | bash
+```
+
+Или, если не хотите запускать скрипт из интернета не глядя:
+
+```bash
+git clone https://github.com/dizelb11/whisper-macfree.git
+cd whisper-macfree && less install.sh && ./install.sh
 ```
 
 Скрипт проверит систему, поставит зависимости, скачает модели, соберёт
